@@ -38,7 +38,11 @@ var fs = require("fs"),
     sass = require('sass'),
     coffee = require('coffee-script'),
     cleanCss = require('clean-css'),
+    gzip = require('gzip-js'),
     Step = require('step');
+
+var gzipOptions = {level: 9};
+var buf = function(d) { return new Buffer(d); }
 
 String.prototype.startsWith = function (str){
     return this.indexOf(str) === 0;
@@ -152,17 +156,22 @@ function processJsBundle(jsBundle, bundleDir, jsFiles, bundleName, cb) {
             allMinJs += ";" + allMinJsArr[i] + "\n";
         }
 
-        fs.writeFile(bundleName, allJs, function (_) {
-            fs.writeFile(bundleName.replace(".js", ".min.js"), allMinJs, cb);
+        var minBundleName = bundleName.replace(".js", ".min.js"),
+            gzBundleName = minBundleName + ".gz";
+
+        fs.writeFile(bundleName, allJs, function(_) {
+            fs.writeFile(minBundleName, allMinJs, function(_) {
+              fs.writeFile(gzBundleName, buf(gzip.zip(buf(allMinJs), gzipOptions)), cb);
+            });
         });
     };
 
     jsFiles.forEach(function (file) {
         // Skip blank lines/files beginning with '.' or '#', but allow ../relative paths
-        if (!(file = file.trim()) 
+        if (!(file = file.trim())
             || (file.startsWith(".") && !file.startsWith(".."))
-            || file.startsWith('#')) 
-            return; 
+            || file.startsWith('#'))
+            return;
 
         var isCoffee = file.endsWith(".coffee"), jsFile = isCoffee
                 ? file.replace(".coffee", ".js")
@@ -170,7 +179,8 @@ function processJsBundle(jsBundle, bundleDir, jsFiles, bundleName, cb) {
 
         var filePath = path.join(bundleDir, file),
                 jsPath = path.join(bundleDir, jsFile),
-                minJsPath = jsPath.replace(".js", ".min.js");
+                minJsPath = jsPath.replace(".js", ".min.js"),
+                gzJsPath = minJsPath + ".gz";
 
         var i = index++;
         pending++;
@@ -186,12 +196,22 @@ function processJsBundle(jsBundle, bundleDir, jsFiles, bundleName, cb) {
                 }
             },
             function (js) {
+                var next = this;
                 getOrCreateMinJs(js, jsPath, minJsPath, function (minJs) {
                     allJsArr[i] = js;
                     allMinJsArr[i] = minJs;
 
-                    if (! --pending) whenDone();                    
+                    next(minJs);
                 });
+            },
+            function (minJs) {
+                var next = this;
+                getOrCreateGzip(minJs, minJsPath, gzJsPath, function (gzJs) {
+                    next(gzJs);
+                });
+            },
+            function () {
+                if (! --pending) whenDone();
             }
         );
     });
@@ -210,27 +230,33 @@ function processCssBundle(cssBundle, bundleDir, cssFiles, bundleName, cb) {
             allMinCss += allMinCssArr[i] + "\n";
         }
 
+        var minBundleName = bundleName.replace(".css", ".min.css"),
+            gzBundleName = minBundleName + "gz";
+
         fs.writeFile(bundleName, allCss, function(_) {
-            fs.writeFile(bundleName.replace(".css", ".min.css"), allMinCss, cb);
+            fs.writeFile(minBundleName, allMinCss, function(_) {
+              fs.writeFile(gzBundleName, buf(gzip.zip(buf(allMinCss), gzipOptions)), cb);
+            });
         });
     };
 
     cssFiles.forEach(function (file) {
-        if (!(file = file.trim()) 
+        if (!(file = file.trim())
             || (file.startsWith(".") && !file.startsWith(".."))
-            || file.startsWith('#')) 
-            return; 
+            || file.startsWith('#'))
+            return;
 
         var isLess = file.endsWith(".less"), isSass = file.endsWith(".sass"),
             cssFile = isLess
                 ? file.replace(".less", ".css")
-                : isSass 
+                : isSass
                     ? file.replace(".sass", ".css")
                     : file;
 
         var filePath = path.join(bundleDir, file),
                 cssPath = path.join(bundleDir, cssFile),
-                minCssPath = cssPath.replace(".css", ".min.css");
+                minCssPath = cssPath.replace(".css", ".min.css"),
+                gzCssPath = minCssPath + ".gz";
 
         var i = index++;
         pending++;
@@ -250,15 +276,25 @@ function processCssBundle(cssBundle, bundleDir, cssFiles, bundleName, cb) {
                 }
             },
             function (css) {
+                var next = this;
                 getOrCreateMinCss(css, cssPath, minCssPath, function (minCss) {
                     allCssArr[i] = css;
                     allMinCssArr[i] = minCss;
 
-                    if (! --pending) whenDone();                    
+                    next(minCss);
                 });
+            },
+            function (minCss) {
+                var next = this;
+                getOrCreateGzip(minCss, minCssPath, gzCssPath, function (gzCss) {
+                    next(gzCss);
+                });
+            },
+            function () {
+                if (! --pending) whenDone();
             }
         );
-    });            
+    });
 }
 
 function getOrCreateJs(coffeeScript, csPath, jsPath, cb /*cb(js)*/) {
@@ -289,7 +325,13 @@ function getOrCreateMinCss(css, cssPath, minCssPath, cb /*cb(minCss)*/) {
         }, css, cssPath, minCssPath, cb);
 }
 
-function compileAsync(mode, compileFn /*compileFn(text, textPath, cb(compiledText))*/, 
+function getOrCreateGzip(content, path, gzPath, cb /*cb(gzContent)*/) {
+    compileAsync("compressing", function (content, path, cb) {
+            cb(buf(gzip.zip(buf(content), gzipOptions)));
+        }, content, path, gzPath, cb);
+}
+
+function compileAsync(mode, compileFn /*compileFn(text, textPath, cb(compiledText))*/,
     text, textPath, compileTextPath, cb /*cb(compiledText)*/) {
     Step(
         function () {
@@ -334,7 +376,7 @@ function compileLess(lessCss, lessPath, cb) {
             paths: ['.', lessDir], // Specify search paths for @import directives
             filename: fileName
         };
-    
+
     less.render(lessCss, options, function (err, css) {
         if (err) return cb("") && console.error(err);
         cb(css);
